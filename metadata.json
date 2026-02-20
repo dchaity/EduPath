@@ -1,0 +1,7 @@
+{
+  "name": "EduPath: University Admission Helper",
+  "description": "A comprehensive platform for students to explore universities, check eligibility, and manage admissions in Bangladesh.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
