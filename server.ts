@@ -4,6 +4,8 @@ import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "http";
 
 dotenv.config();
 
@@ -68,6 +70,25 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (university_id) REFERENCES universities(id)
   );
+
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    name TEXT,
+    type TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    message TEXT,
+    is_read INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `);
 
 // Seed initial data
@@ -109,9 +130,38 @@ insertScholarship.run("EWU Medha Lalon", 13, "100% Waiver", "2025-06-15", "Merit
 insertScholarship.run("IUB Financial Grant", 14, "25-50% Waiver", "2025-07-20", "Need-based grant for students from low-income families or remote areas.");
 insertScholarship.run("UIU Innovation Award", 15, "Fixed Grant", "2025-10-10", "Awarded to students who demonstrate exceptional projects in the UIU Innovation Lab.");
 
+// Store active WebSocket connections
+const clients = new Map<number, WebSocket>();
+
+function sendNotification(userId: number, message: string) {
+  try {
+    const stmt = db.prepare("INSERT INTO notifications (user_id, message) VALUES (?, ?)");
+    stmt.run(userId, message);
+    
+    const client = clients.get(userId);
+    if (client && client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: "NOTIFICATION", message }));
+    }
+  } catch (error) {
+    console.error("Failed to send notification:", error);
+  }
+}
+
 async function startServer() {
   const app = express();
+  const server = createServer(app);
+  const wss = new WebSocketServer({ server });
   const PORT = 3000;
+
+  wss.on("connection", (ws, req) => {
+    const url = new URL(req.url || "", `http://${req.headers.host}`);
+    const userId = parseInt(url.searchParams.get("userId") || "0");
+    
+    if (userId) {
+      clients.set(userId, ws);
+      ws.on("close", () => clients.delete(userId));
+    }
+  });
 
   app.use(express.json());
 
@@ -202,6 +252,158 @@ async function startServer() {
     }
   });
 
+  // Documents Endpoints
+  app.get("/api/documents/:userId", (req, res) => {
+    const docs = db.prepare("SELECT * FROM documents WHERE user_id = ? ORDER BY created_at DESC").all(req.params.userId);
+    res.json(docs);
+  });
+
+  app.post("/api/documents", (req, res) => {
+    const { user_id, name, type } = req.body;
+    try {
+      const stmt = db.prepare("INSERT INTO documents (user_id, name, type) VALUES (?, ?, ?)");
+      const result = stmt.run(user_id, name, type);
+      res.json({ id: result.lastInsertRowid, success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  // Notifications Endpoints
+  app.get("/api/notifications/:userId", (req, res) => {
+    const notifications = db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20").all(req.params.userId);
+    res.json(notifications);
+  });
+
+  app.post("/api/notifications/read", (req, res) => {
+    const { user_id } = req.body;
+    db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(user_id);
+    res.json({ success: true });
+  });
+
+  // Update Application Status with Notification
+  app.put("/api/admin/applications/:id/status", (req, res) => {
+    const { status } = req.body;
+    try {
+      const appData = db.prepare("SELECT user_id, university_id FROM applications WHERE id = ?").get(req.params.id) as any;
+      const uni = db.prepare("SELECT name FROM universities WHERE id = ?").get(appData.university_id) as any;
+      
+      db.prepare("UPDATE applications SET status = ? WHERE id = ?").run(status, req.params.id);
+      
+      sendNotification(appData.user_id, `Your application for ${uni.name} has been ${status}.`);
+      
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.put("/api/admin/scholarship-applications/:id/status", (req, res) => {
+    const { status } = req.body;
+    try {
+      const appData = db.prepare("SELECT user_id, scholarship_id FROM scholarship_applications WHERE id = ?").get(req.params.id) as any;
+      const scholarship = db.prepare("SELECT name FROM scholarships WHERE id = ?").get(appData.scholarship_id) as any;
+      
+      db.prepare("UPDATE scholarship_applications SET status = ? WHERE id = ?").run(status, req.params.id);
+      
+      sendNotification(appData.user_id, `Your scholarship application for ${scholarship.name} has been ${status}.`);
+      
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.put("/api/admin/documents/:id/status", (req, res) => {
+    const { status } = req.body;
+    try {
+      const doc = db.prepare("SELECT user_id, name FROM documents WHERE id = ?").get(req.params.id) as any;
+      db.prepare("UPDATE documents SET status = ? WHERE id = ?").run(status, req.params.id);
+      sendNotification(doc.user_id, `Your document "${doc.name}" has been ${status}.`);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  // Admin CRUD for Universities
+  app.post("/api/admin/universities", (req, res) => {
+    const { name, type, location, description, min_ssc_gpa, min_hsc_gpa, website } = req.body;
+    try {
+      const stmt = db.prepare("INSERT INTO universities (name, type, location, description, min_ssc_gpa, min_hsc_gpa, website) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      const result = stmt.run(name, type, location, description, min_ssc_gpa, min_hsc_gpa, website);
+      res.json({ id: result.lastInsertRowid, success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.put("/api/admin/universities/:id", (req, res) => {
+    const { name, type, location, description, min_ssc_gpa, min_hsc_gpa, website } = req.body;
+    try {
+      const stmt = db.prepare("UPDATE universities SET name = ?, type = ?, location = ?, description = ?, min_ssc_gpa = ?, min_hsc_gpa = ?, website = ? WHERE id = ?");
+      stmt.run(name, type, location, description, min_ssc_gpa, min_hsc_gpa, website, req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/admin/universities/:id", (req, res) => {
+    try {
+      db.prepare("DELETE FROM universities WHERE id = ?").run(req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  // Admin CRUD for Scholarships
+  app.post("/api/admin/scholarships", (req, res) => {
+    const { name, university_id, amount, deadline, description } = req.body;
+    try {
+      const stmt = db.prepare("INSERT INTO scholarships (name, university_id, amount, deadline, description) VALUES (?, ?, ?, ?, ?)");
+      const result = stmt.run(name, university_id, amount, deadline, description);
+      res.json({ id: result.lastInsertRowid, success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.put("/api/admin/scholarships/:id", (req, res) => {
+    const { name, university_id, amount, deadline, description } = req.body;
+    try {
+      const stmt = db.prepare("UPDATE scholarships SET name = ?, university_id = ?, amount = ?, deadline = ?, description = ? WHERE id = ?");
+      stmt.run(name, university_id, amount, deadline, description, req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/admin/scholarships/:id", (req, res) => {
+    try {
+      db.prepare("DELETE FROM scholarships WHERE id = ?").run(req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  // User Profile Update
+  app.put("/api/users/:id", (req, res) => {
+    const { name, ssc_gpa, hsc_gpa, group_name } = req.body;
+    try {
+      const stmt = db.prepare("UPDATE users SET name = ?, ssc_gpa = ?, hsc_gpa = ?, group_name = ? WHERE id = ?");
+      stmt.run(name, ssc_gpa, hsc_gpa, group_name, req.params.id);
+      const updatedUser = db.prepare("SELECT * FROM users WHERE id = ?").get(req.params.id) as any;
+      const { password: _, ...userWithoutPassword } = updatedUser;
+      res.json(userWithoutPassword);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
   // Admin Endpoints
   app.get("/api/admin/users", (req, res) => {
     const users = db.prepare("SELECT id, name, email, role, ssc_gpa, hsc_gpa, group_name, last_active, created_at FROM users").all();
@@ -241,7 +443,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }

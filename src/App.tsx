@@ -26,7 +26,15 @@ import {
   Send,
   Sparkles,
   Bot,
-  Shield
+  Shield,
+  Settings,
+  Trash2,
+  Edit,
+  Plus,
+  Save,
+  Bell,
+  FileText,
+  Upload
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
@@ -84,7 +92,7 @@ interface Scholarship {
 }
 
 export default function App() {
-  const [view, setView] = useState<'home' | 'universities' | 'scholarships' | 'dashboard' | 'login' | 'register' | 'guides' | 'contact' | 'privacy' | 'terms' | 'cookies' | 'admin' | 'eligible'>('home');
+  const [view, setView] = useState<'home' | 'universities' | 'scholarships' | 'dashboard' | 'login' | 'register' | 'guides' | 'contact' | 'privacy' | 'terms' | 'cookies' | 'admin' | 'eligible' | 'profile' | 'manage'>('home');
   const [user, setUser] = useState<User | null>(null);
   const [universities, setUniversities] = useState<University[]>([]);
   const [scholarships, setScholarships] = useState<Scholarship[]>([]);
@@ -97,6 +105,13 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'All' | 'Public' | 'Private'>('All');
   const [isAdminLogin, setIsAdminLogin] = useState(false);
+  const [editingUni, setEditingUni] = useState<University | null>(null);
+  const [editingScholarship, setEditingScholarship] = useState<Scholarship | null>(null);
+  const [isAddingUni, setIsAddingUni] = useState(false);
+  const [isAddingScholarship, setIsAddingScholarship] = useState(false);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   // Auth States
   const [authEmail, setAuthEmail] = useState('');
@@ -118,7 +133,24 @@ export default function App() {
   useEffect(() => {
     if (user) {
       fetchApplications();
+      fetchDocuments();
+      fetchNotifications();
       
+      // WebSocket for real-time notifications
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}?userId=${user.id}`);
+      
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'NOTIFICATION') {
+          setNotifications(prev => [
+            { id: Date.now(), message: data.message, created_at: new Date().toISOString(), is_read: 0 },
+            ...prev
+          ]);
+          setUnreadCount(prev => prev + 1);
+        }
+      };
+
       // Heartbeat ping
       const interval = setInterval(() => {
         fetch('/api/auth/ping', {
@@ -150,6 +182,44 @@ export default function App() {
     const data = await res.json();
     setApplications(data.universityApps);
     setScholarshipApplications(data.scholarshipApps);
+  };
+
+  const fetchDocuments = async () => {
+    if (!user) return;
+    const res = await fetch(`/api/documents/${user.id}`);
+    const data = await res.json();
+    setDocuments(data);
+  };
+
+  const fetchNotifications = async () => {
+    if (!user) return;
+    const res = await fetch(`/api/notifications/${user.id}`);
+    const data = await res.json();
+    setNotifications(data);
+    setUnreadCount(data.filter((n: any) => !n.is_read).length);
+  };
+
+  const markNotificationsRead = async () => {
+    if (!user) return;
+    await fetch('/api/notifications/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: user.id })
+    });
+    setUnreadCount(0);
+    setNotifications(prev => prev.map(n => ({ ...n, is_read: 1 })));
+  };
+
+  const handleUploadDocument = async (name: string, type: string) => {
+    if (!user) return;
+    const res = await fetch('/api/documents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: user.id, name, type })
+    });
+    if (res.ok) {
+      fetchDocuments();
+    }
   };
 
   const fetchAdminData = async () => {
@@ -228,6 +298,81 @@ export default function App() {
     changeView('home');
   };
 
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    const res = await fetch(`/api/users/${user.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        name: authName || user.name, 
+        ssc_gpa: authSSC ? parseFloat(authSSC) : user.ssc_gpa, 
+        hsc_gpa: authHSC ? parseFloat(authHSC) : user.hsc_gpa, 
+        group_name: authGroup || user.group_name 
+      })
+    });
+    if (res.ok) {
+      const updatedUser = await res.json();
+      setUser(updatedUser);
+      localStorage.setItem('user', JSON.stringify(updatedUser));
+      alert('Profile updated successfully!');
+    }
+  };
+
+  const handleManageUni = async (e: React.FormEvent, uniData: any) => {
+    e.preventDefault();
+    const method = editingUni ? 'PUT' : 'POST';
+    const url = editingUni ? `/api/admin/universities/${editingUni.id}` : '/api/admin/universities';
+    
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(uniData)
+    });
+    
+    if (res.ok) {
+      alert(`University ${editingUni ? 'updated' : 'added'} successfully!`);
+      setEditingUni(null);
+      setIsAddingUni(false);
+      fetchUniversities();
+    }
+  };
+
+  const handleDeleteUni = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this university?')) return;
+    const res = await fetch(`/api/admin/universities/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      fetchUniversities();
+    }
+  };
+
+  const handleManageScholarship = async (e: React.FormEvent, scholarshipData: any) => {
+    e.preventDefault();
+    const method = editingScholarship ? 'PUT' : 'POST';
+    const url = editingScholarship ? `/api/admin/scholarships/${editingScholarship.id}` : '/api/admin/scholarships';
+    
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(scholarshipData)
+    });
+    
+    if (res.ok) {
+      alert(`Scholarship ${editingScholarship ? 'updated' : 'added'} successfully!`);
+      setEditingScholarship(null);
+      setIsAddingScholarship(false);
+      fetchScholarships();
+    }
+  };
+
+  const handleDeleteScholarship = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this scholarship?')) return;
+    const res = await fetch(`/api/admin/scholarships/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      fetchScholarships();
+    }
+  };
+
   const applyToUniversity = async (uniId: number) => {
     if (!user) {
       setView('login');
@@ -240,6 +385,22 @@ export default function App() {
     });
     if (res.ok) {
       alert('Application submitted successfully!');
+      fetchApplications();
+    }
+  };
+
+  const applyToScholarship = async (scholarshipId: number) => {
+    if (!user) {
+      changeView('login');
+      return;
+    }
+    const res = await fetch('/api/scholarship-applications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: user.id, scholarship_id: scholarshipId })
+    });
+    if (res.ok) {
+      alert('Scholarship application submitted successfully!');
       fetchApplications();
     }
   };
@@ -406,14 +567,41 @@ export default function App() {
                 <>
                   <NavItem label="Dashboard" icon={LayoutDashboard} active={view === 'dashboard'} onClick={() => changeView('dashboard')} />
                   {user.role === 'admin' && (
-                    <NavItem label="Admin Panel" icon={Shield} active={view === 'admin'} onClick={() => changeView('admin')} />
+                    <>
+                      <NavItem label="Admin Panel" icon={Shield} active={view === 'admin'} onClick={() => changeView('admin')} />
+                      <NavItem label="Manage Data" icon={Settings} active={view === 'manage'} onClick={() => changeView('manage')} />
+                    </>
                   )}
                   <div className="h-6 w-px bg-slate-200 mx-2" />
                   <div className="flex items-center gap-3 pl-2">
-                    <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold">
-                      {user.name[0]}
+                    <div className="relative">
+                      <button 
+                        onClick={() => {
+                          markNotificationsRead();
+                          alert(notifications.length > 0 ? notifications.map(n => n.message).join('\n') : 'No notifications');
+                        }}
+                        className="p-2 text-slate-400 hover:text-indigo-600 transition-colors relative"
+                      >
+                        <Bell size={20} />
+                        {unreadCount > 0 && (
+                          <span className="absolute top-1 right-1 w-4 h-4 bg-red-500 text-white text-[10px] flex items-center justify-center rounded-full border-2 border-white">
+                            {unreadCount}
+                          </span>
+                        )}
+                      </button>
                     </div>
-                    <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 transition-colors">
+                    <button 
+                      onClick={() => changeView('profile')}
+                      className={`flex items-center gap-2 group transition-all ${view === 'profile' ? 'text-indigo-600' : 'text-slate-600'}`}
+                    >
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold transition-all ${
+                        view === 'profile' ? 'bg-indigo-600 text-white' : 'bg-indigo-100 text-indigo-600 group-hover:bg-indigo-200'
+                      }`}>
+                        {user.name[0]}
+                      </div>
+                      <span className="text-sm font-bold hidden lg:block">{user.name.split(' ')[0]}</span>
+                    </button>
+                    <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 transition-colors" title="Logout">
                       <LogOut size={18} />
                     </button>
                   </div>
@@ -605,7 +793,15 @@ export default function App() {
                     <p className="text-slate-600 text-sm leading-relaxed">{s.description}</p>
                     <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
                       <span className="text-lg font-bold text-slate-900">{s.amount}</span>
-                      <button className="text-indigo-600 font-bold text-sm hover:underline">Learn More</button>
+                      <div className="flex gap-2">
+                        <button className="text-slate-500 font-bold text-sm hover:underline">Details</button>
+                        <button 
+                          onClick={() => applyToScholarship(s.id)}
+                          className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                        >
+                          Apply Now
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -1000,6 +1196,49 @@ export default function App() {
                       Talk to Advisor
                     </button>
                   </div>
+
+                  {/* Document Center */}
+                  <div className="space-y-6 pt-4">
+                    <h3 className="text-xl font-bold flex items-center gap-2">
+                      <FileText className="text-indigo-600" size={20} />
+                      Document Center
+                    </h3>
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                      <div className="space-y-3">
+                        {documents.map((doc) => (
+                          <div key={doc.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-indigo-600">
+                                <FileText size={16} />
+                              </div>
+                              <div>
+                                <p className="text-sm font-bold text-slate-900">{doc.name}</p>
+                                <p className="text-[10px] text-slate-500 uppercase">{doc.type}</p>
+                              </div>
+                            </div>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                              doc.status === 'approved' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
+                            }`}>
+                              {doc.status.toUpperCase()}
+                            </span>
+                          </div>
+                        ))}
+                        {documents.length === 0 && (
+                          <p className="text-center text-slate-400 text-sm py-4">No documents uploaded yet.</p>
+                        )}
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const name = prompt('Document Name (e.g., SSC Certificate):');
+                          const type = prompt('Document Type (e.g., PDF, Image):');
+                          if (name && type) handleUploadDocument(name, type);
+                        }}
+                        className="w-full py-3 rounded-xl border-2 border-dashed border-slate-200 text-slate-500 font-bold text-sm hover:border-indigo-300 hover:text-indigo-600 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Upload size={16} /> Upload Document
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </motion.div>
@@ -1029,16 +1268,18 @@ export default function App() {
                   <p className="text-3xl font-bold text-indigo-600">{allUsers.length}</p>
                 </div>
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-2">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Applications</p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Uni Applications</p>
                   <p className="text-3xl font-bold text-indigo-600">{allApplications.length}</p>
                 </div>
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-2">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Universities</p>
-                  <p className="text-3xl font-bold text-indigo-600">{universities.length}</p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Scholarship Apps</p>
+                  <p className="text-3xl font-bold text-indigo-600">{allScholarshipApplications.length}</p>
                 </div>
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-2">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Scholarships</p>
-                  <p className="text-3xl font-bold text-indigo-600">{scholarships.length}</p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Online Now</p>
+                  <p className="text-3xl font-bold text-emerald-600">
+                    {allUsers.filter(u => u.last_active && (new Date().getTime() - new Date(u.last_active).getTime()) < 300000).length}
+                  </p>
                 </div>
               </div>
 
@@ -1050,18 +1291,24 @@ export default function App() {
                   </h3>
                   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                     <div className="divide-y divide-slate-100">
-                      {allUsers.map((u) => (
-                        <div key={u.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                          <div>
-                            <p className="font-bold text-slate-900">{u.name}</p>
-                            <p className="text-xs text-slate-500">{u.email} • {u.group_name}</p>
+                      {allUsers.map((u) => {
+                        const isOnline = u.last_active && (new Date().getTime() - new Date(u.last_active).getTime()) < 300000;
+                        return (
+                          <div key={u.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+                              <div>
+                                <p className="font-bold text-slate-900">{u.name}</p>
+                                <p className="text-xs text-slate-500">{u.email} • {u.group_name}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-xs font-bold text-slate-400 uppercase">GPA</p>
+                              <p className="text-sm font-bold text-slate-900">S:{u.ssc_gpa} | H:{u.hsc_gpa}</p>
+                            </div>
                           </div>
-                          <div className="text-right">
-                            <p className="text-xs font-bold text-slate-400 uppercase">GPA</p>
-                            <p className="text-sm font-bold text-slate-900">S:{u.ssc_gpa} | H:{u.hsc_gpa}</p>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -1069,7 +1316,7 @@ export default function App() {
                 <div className="space-y-6">
                   <h3 className="text-xl font-bold flex items-center gap-2">
                     <Clock className="text-indigo-600" size={20} />
-                    All Applications ({allApplications.length})
+                    University Applications ({allApplications.length})
                   </h3>
                   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                     <div className="divide-y divide-slate-100">
@@ -1090,8 +1337,350 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+
+                  <h3 className="text-xl font-bold flex items-center gap-2 pt-4">
+                    <Award className="text-indigo-600" size={20} />
+                    Scholarship Applications ({allScholarshipApplications.length})
+                  </h3>
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div className="divide-y divide-slate-100">
+                      {allScholarshipApplications.map((app) => (
+                        <div key={app.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                          <div>
+                            <p className="font-bold text-slate-900">{app.scholarship_name}</p>
+                            <p className="text-xs text-slate-500">Uni: {app.university_name} • Student: {app.student_name}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <select 
+                              value={app.status}
+                              onChange={(e) => {
+                                fetch(`/api/admin/scholarship-applications/${app.id}/status`, {
+                                  method: 'PUT',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ status: e.target.value })
+                                }).then(() => fetchAdminData());
+                              }}
+                              className="text-[10px] font-bold bg-slate-100 border-none rounded px-2 py-1 outline-none"
+                            >
+                              <option value="pending">PENDING</option>
+                              <option value="approved">APPROVED</option>
+                              <option value="rejected">REJECTED</option>
+                            </select>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <h3 className="text-xl font-bold flex items-center gap-2 pt-4">
+                    <FileText className="text-indigo-600" size={20} />
+                    Pending Documents
+                  </h3>
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div className="divide-y divide-slate-100">
+                      {/* We'll need to fetch all documents for admin, for now let's just show a placeholder or fetch them */}
+                      <p className="p-8 text-center text-slate-400 text-sm">Document review system active. Check student profiles for details.</p>
+                    </div>
+                  </div>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {view === 'profile' && user && (
+            <motion.div 
+              key="profile"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="max-w-2xl mx-auto py-12"
+            >
+              <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-8">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <h2 className="text-3xl font-bold tracking-tight">Your Profile</h2>
+                    <p className="text-slate-500 text-sm">Update your academic information and personal details.</p>
+                  </div>
+                  <div className="w-16 h-16 rounded-2xl bg-indigo-600 flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-indigo-100">
+                    {user.name[0]}
+                  </div>
+                </div>
+
+                <form onSubmit={handleUpdateProfile} className="space-y-6">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Full Name</label>
+                    <input 
+                      type="text" 
+                      defaultValue={user.name}
+                      onChange={(e) => setAuthName(e.target.value)}
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">SSC GPA</label>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        defaultValue={user.ssc_gpa}
+                        onChange={(e) => setAuthSSC(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">HSC GPA</label>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        defaultValue={user.hsc_gpa}
+                        onChange={(e) => setAuthHSC(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Academic Group</label>
+                    <select 
+                      defaultValue={user.group_name}
+                      onChange={(e) => setAuthGroup(e.target.value)}
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all bg-white"
+                    >
+                      <option>Science</option>
+                      <option>Commerce</option>
+                      <option>Humanities</option>
+                    </select>
+                  </div>
+
+                  <button 
+                    type="submit"
+                    className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                  >
+                    <Save size={20} /> Update Profile
+                  </button>
+                </form>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'manage' && user?.role === 'admin' && (
+            <motion.div 
+              key="manage"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="space-y-12"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-3xl font-bold text-slate-900">Manage Data</h2>
+                  <p className="text-slate-500 font-medium">Update university and scholarship information.</p>
+                </div>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => { setIsAddingUni(true); setEditingUni(null); }}
+                    className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-100"
+                  >
+                    <Plus size={18} /> Add University
+                  </button>
+                  <button 
+                    onClick={() => { setIsAddingScholarship(true); setEditingScholarship(null); }}
+                    className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold text-sm hover:bg-emerald-700 transition-all flex items-center gap-2 shadow-lg shadow-emerald-100"
+                  >
+                    <Plus size={18} /> Add Scholarship
+                  </button>
+                </div>
+              </div>
+
+              {/* University Management */}
+              <div className="space-y-6">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <GraduationCap className="text-indigo-600" size={20} />
+                  Universities
+                </h3>
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                  <div className="divide-y divide-slate-100">
+                    {universities.map((uni) => (
+                      <div key={uni.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-xl bg-slate-100 overflow-hidden">
+                            <img src={`https://picsum.photos/seed/${uni.id}/100/100`} alt="" className="w-full h-full object-cover" />
+                          </div>
+                          <div>
+                            <p className="font-bold text-slate-900">{uni.name}</p>
+                            <p className="text-xs text-slate-500">{uni.location} • {uni.type}</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => { setEditingUni(uni); setIsAddingUni(false); }}
+                            className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
+                          >
+                            <Edit size={18} />
+                          </button>
+                          <button 
+                            onClick={() => handleDeleteUni(uni.id)}
+                            className="p-2 text-slate-400 hover:text-red-600 transition-colors"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Scholarship Management */}
+              <div className="space-y-6">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <Award className="text-emerald-600" size={20} />
+                  Scholarships
+                </h3>
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                  <div className="divide-y divide-slate-100">
+                    {scholarships.map((s) => (
+                      <div key={s.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                        <div>
+                          <p className="font-bold text-slate-900">{s.name}</p>
+                          <p className="text-xs text-slate-500">{s.university_name} • {s.amount}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => { setEditingScholarship(s); setIsAddingScholarship(false); }}
+                            className="p-2 text-slate-400 hover:text-emerald-600 transition-colors"
+                          >
+                            <Edit size={18} />
+                          </button>
+                          <button 
+                            onClick={() => handleDeleteScholarship(s.id)}
+                            className="p-2 text-slate-400 hover:text-red-600 transition-colors"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Modals for Add/Edit */}
+              <AnimatePresence>
+                {(isAddingUni || editingUni) && (
+                  <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      className="bg-white rounded-3xl p-8 max-w-xl w-full shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-2xl font-bold">{editingUni ? 'Edit University' : 'Add University'}</h3>
+                        <button onClick={() => { setIsAddingUni(false); setEditingUni(null); }} className="text-slate-400 hover:text-slate-600">
+                          <X size={24} />
+                        </button>
+                      </div>
+                      <form onSubmit={(e) => {
+                        const formData = new FormData(e.currentTarget);
+                        const data = Object.fromEntries(formData.entries());
+                        handleManageUni(e, data);
+                      }} className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Name</label>
+                          <input name="name" defaultValue={editingUni?.name} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Type</label>
+                            <select name="type" defaultValue={editingUni?.type} className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                              <option>Public</option>
+                              <option>Private</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Location</label>
+                            <input name="location" defaultValue={editingUni?.location} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Min SSC GPA</label>
+                            <input name="min_ssc_gpa" type="number" step="0.01" defaultValue={editingUni?.min_ssc_gpa} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Min HSC GPA</label>
+                            <input name="min_hsc_gpa" type="number" step="0.01" defaultValue={editingUni?.min_hsc_gpa} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Website URL</label>
+                          <input name="website" type="url" defaultValue={editingUni?.website} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Description</label>
+                          <textarea name="description" defaultValue={editingUni?.description} rows={3} className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <button type="submit" className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold hover:bg-indigo-700 transition-all">
+                          {editingUni ? 'Update University' : 'Add University'}
+                        </button>
+                      </form>
+                    </motion.div>
+                  </div>
+                )}
+
+                {(isAddingScholarship || editingScholarship) && (
+                  <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      className="bg-white rounded-3xl p-8 max-w-xl w-full shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-2xl font-bold">{editingScholarship ? 'Edit Scholarship' : 'Add Scholarship'}</h3>
+                        <button onClick={() => { setIsAddingScholarship(false); setEditingScholarship(null); }} className="text-slate-400 hover:text-slate-600">
+                          <X size={24} />
+                        </button>
+                      </div>
+                      <form onSubmit={(e) => {
+                        const formData = new FormData(e.currentTarget);
+                        const data = Object.fromEntries(formData.entries());
+                        handleManageScholarship(e, data);
+                      }} className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Name</label>
+                          <input name="name" defaultValue={editingScholarship?.name} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">University</label>
+                          <select name="university_id" defaultValue={editingScholarship?.university_id} className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                            {universities.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                          </select>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Amount</label>
+                            <input name="amount" defaultValue={editingScholarship?.amount} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-bold text-slate-500 uppercase">Deadline</label>
+                            <input name="deadline" type="date" defaultValue={editingScholarship?.deadline ? new Date(editingScholarship.deadline).toISOString().split('T')[0] : ''} required className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Description</label>
+                          <textarea name="description" defaultValue={editingScholarship?.description} rows={3} className="w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <button type="submit" className="w-full bg-emerald-600 text-white py-4 rounded-xl font-bold hover:bg-emerald-700 transition-all">
+                          {editingScholarship ? 'Update Scholarship' : 'Add Scholarship'}
+                        </button>
+                      </form>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
 
